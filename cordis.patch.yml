@@ -1,0 +1,6 @@
+# dsh-memory 的 Loader 补丁：只插入一行，开关都走 Config（设置页可改）
+- insert:
+    - id: memory
+      name: dsh-memory
+      config:
+        enabled: true

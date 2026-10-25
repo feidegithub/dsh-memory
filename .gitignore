@@ -1,0 +1,23 @@
+# 依赖与构建产物
+node_modules/
+.pnpm-store/
+
+# 真实记忆数据（不在仓库里；万一有人把数据目录拷进来也别提交）
+entries.jsonl
+misses.jsonl
+purged.jsonl
+recall-log.jsonl
+stats.json
+consolidate.json
+export-*.json
+backups/
+archive/
+episodes/
+memory.log
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.tmp

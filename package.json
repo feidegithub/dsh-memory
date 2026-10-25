@@ -1,0 +1,58 @@
+{
+  "name": "dsh-memory",
+  "version": "0.2.0",
+  "private": true,
+  "description": "DSH 插件：会遗忘但永不删除的分层记忆 —— 常用越牢、久置变淡、60 秒想不起来就算忘了。",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib",
+    "tools/smoke.mjs",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "docs",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "memory",
+    "deepseek-harness"
+  ],
+  "license": "MIT",
+  "engines": {
+    "dsh": ">=0.1.7-rc.1",
+    "node": ">=22"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/feidegithub/dsh-memory.git"
+  },
+  "bugs": {
+    "url": "https://github.com/feidegithub/dsh-memory/issues"
+  },
+  "homepage": "https://github.com/feidegithub/dsh-memory#readme"
+}

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Memory",
+    "description": "Layered memory that forgets but never deletes: frequently used memories stay sharp, unused ones fade, and a recall that takes longer than 60 seconds counts as forgotten."
+  }
+}
