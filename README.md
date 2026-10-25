@@ -6,7 +6,7 @@
 - 回忆从快到慢逐层下沉；**60 秒内想不起来就当作忘了**；
 - 联想只用本地规则（同义词表 + 别名），**不调模型**（零 token）。
 
-完整设计见 [`docs/design.md`](docs/design.md)。
+完整设计见 [`docs/design.md`](docs/design.md)，变更历史见 [`CHANGELOG.md`](CHANGELOG.md)。
 
 ## 安装
 

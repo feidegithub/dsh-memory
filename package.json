@@ -22,7 +22,8 @@
     "icon.svg",
     "README.md",
     "docs",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "keywords": [
     "dsh",
