@@ -60,6 +60,14 @@ check('识别为文档样式', looksLikeDocument(doc) === true)
 check('整段文档 → 0 条', extract(doc).length === 0, `抽到 ${extract(doc).length} 条`)
 check('文档里显式"记住"仍生效', extract(`${doc}\n记住：E 盘拔了不影响主存。`).length >= 1)
 
+console.log(`\n[1d] 系统提醒与碎片句不该被记（2026-10-28 复盘抓到的）`)
+const reminder = '[SCHEDULE REMINDER] 记忆系统复盘：看命中率、有没有该修的），有异常直接修并说明。'
+check('定时提醒整条 → 0 条', extract(reminder).length === 0)
+check('提醒里的"记住了什么"不算信号', extract('正常就给你三行小结（记住了什么、命中率）。').length === 0)
+check('半截话（7 字）不记', extract('改成像人那样吧。').length === 0)
+check('连词开头的碎片不记', extract('还有每次回消息时只回了一条，这个能不能改成直接发。').length === 0)
+check('正经的"记住：…"还记', extract('记住：周五前把报告发我。').length === 1)
+
 console.log(`\n[1c] volatile 配置包装器必须拆开（同一天的根因）`)
 const wrapped = {
   enabled: { get: () => false },
