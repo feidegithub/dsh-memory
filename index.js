@@ -31,6 +31,8 @@ import { RecallEngine } from './lib/recall.mjs'
 import { Stats } from './lib/stats.mjs'
 import { extract, SENSITIVE } from './lib/extract.mjs'
 import { clamp, describeEntry, layerOf, strengthAt } from './lib/model.mjs'
+import { readEmotion, defaultEmotionFile, depthFactor } from './lib/emotion-bridge.mjs'
+import { drainInbox } from './lib/inbox.mjs'
 import { estimateTokens } from './lib/tokenize.mjs'
 import { resolveConfig, toBool, toNum, toStr } from './lib/config.mjs'
 import { DeepSearch } from './lib/deep.mjs'
@@ -39,13 +41,17 @@ import { Consolidator, readLastReport } from './lib/consolidate.mjs'
 import { readBody, parseUrl, sendJson } from './lib/http.mjs'
 
 export const name = 'memory'
-export const inject = ['tools', 'systemPrompt', 'webServer']
+// 2026-11-07：webServer 不再列为必需服务——headless 会话（心跳唤醒）没有 webServer，
+// 但那边也需要 memory_recall / memory_remember 才有连续的记性。有就挂设置页接口，没有就跳过。
+export const inject = ['tools', 'systemPrompt']
 
 const DEFAULTS = {
   enabled: true,
   storageDir: DEFAULT_STORAGE_DIR,
   autoRecall: 'fast',
   coreBudgetTokens: 600,
+  crossSessionDaily: true,     // 把当天其它桌面会话的片段也注入（同一个使用者，多窗口）
+  crossSessionFragments: 6,    // 最多几条；只取最近的
   warmBudgetTokens: 1200,
   recallLimit: 8,
   recallDeadlineMs: 60000,
@@ -64,6 +70,7 @@ const DEFAULTS = {
   maxFileMB: 8,               // entries.jsonl 超过就压缩
   catchUpOnStart: true,       // 启动时补跑错过的巩固
   coldBackupDir: '',          // 冷备目录（外挂盘）；留空 = 不做冷备
+  emotionFile: '',            // 情绪状态文件；留空 = 和 dsh-persona / dm-watch 同一个 emotion.json
 }
 
 const num = (v, d) => {
@@ -94,6 +101,7 @@ export const Config = z ? z.object({
   maxFileMB: z.natural().default(8).extra('volatile', true),
   catchUpOnStart: z.boolean().default(true).extra('volatile', true),
   coldBackupDir: z.string().default('').extra('volatile', true),
+  emotionFile: z.string().default('').extra('volatile', true),
 }) : undefined
 
 const DEFAULT_SYNONYMS = {
@@ -156,6 +164,9 @@ export function apply(ctx, rawConfig) {
   cfg.maxFileBytes = cfg.maxFileMB * 1024 * 1024
   cfg.catchUpOnStart = toBool(cfg.catchUpOnStart, true)
   cfg.coldBackupDir = toStr(cfg.coldBackupDir, '')
+  // 情绪 → 记忆深度（2026-10-30）：默认读 dsh-persona / dm-watch 共用的那个文件；
+  // 文件不在就当作平静，记忆照常按原规则走。
+  cfg.emotionFile = toStr(cfg.emotionFile, '') || defaultEmotionFile()
 
   const paths = layout(root)
   ensureLayout(paths)
@@ -182,6 +193,30 @@ export function apply(ctx, rawConfig) {
     : null
   const engine = new RecallEngine({ store, cfg, stats, paths, log: bootLog, synonyms, deep })
   const consolidator = new Consolidator({ store, stats, paths, deep, cfg, log: bootLog })
+
+  /** 读一次当前情绪（只读；文件不在/坏了 → 平静 weight 0） */
+  const currentEmotion = () => {
+    try { return readEmotion(cfg.emotionFile) } catch { return null }
+  }
+
+  /**
+   * 抖音使用者私信的收件箱（2026-10-30）：dm-watch 只追加、这里单进程收。
+   * 每条消息带当时的情绪快照，入账时按那一刻算深度。
+   */
+  const drainOwnerInbox = () => {
+    try {
+      return drainInbox({ root, store, cfg, log: bootLog, stats })
+    } catch (e) {
+      bootLog(`收件箱处理失败：${e?.message || e}`)
+      return null
+    }
+  }
+  drainOwnerInbox()   // 桌面刚起来：先把关着时攒下的 DM 收进来
+  ctx.effect(() => {
+    const timer = setInterval(() => { drainOwnerInbox() }, 60_000)
+    if (timer.unref) timer.unref()
+    return () => clearInterval(timer)
+  })
 
   // 补跑：App 没开到 03:30 的话，那颗定时器就错过了；启动后补一次（15 秒后，别拖慢启动）
   if (cfg.catchUpOnStart) {
@@ -230,7 +265,11 @@ export function apply(ctx, rawConfig) {
       return ''
     }
     const lines = []
-    let used = 0
+    const emo = currentEmotion()
+    const emoLine = emo && emo.weight >= 0.55
+      ? `- （此刻情绪偏浓：${emo.label} ${emo.v.toFixed(2)}——现在记下的事会留得更久；记不记，由你决定。）`
+      : ''
+    let used = emoLine ? estimateTokens(emoLine) : 0
     for (const { entry } of all) {
       const line = `- [${entry.kind}] ${entry.text}`
       const t = estimateTokens(line)
@@ -243,6 +282,7 @@ export function apply(ctx, rawConfig) {
       '## 我知道的事（背景，不必复述）',
       '这些是我本来就记得的事。回答时直接当已知条件用，**不要说"我想起来了 / 根据记忆 / 记录显示"**，也不要点 id；',
       '只在需要把旧事和眼前的事对上时，自然地说"你之前说过…"。与章程、与你的明确指示冲突时，以章程和你为准。',
+      emoLine,
       ...lines,
       hidden > 0 ? `- （另有 ${hidden} 条较淡的事，需要时用 memory_recall 查）` : '',
     ].filter(Boolean).join('\n')
@@ -251,6 +291,56 @@ export function apply(ctx, rawConfig) {
     return text
   }
 
+  /**
+   * 2026-11-07：把当天其它桌面会话的片段也接进来。
+   * 同一个使用者会在多个窗口里聊；session-to-daily 每 5 分钟把各会话写进
+   * memory/daily/YYYY-MM-DD.jsonl，这里只取最近几条，给每个桌面会话一个共同背景。
+   * 不整段搬原文，只留「他说了什么 / 我回了什么」的短摘要。
+   */
+  let crossCache = { at: 0, text: '' }
+  function renderCrossSession() {
+    if (cfg.crossSessionDaily === false) return ''
+    const now = Date.now()
+    if (now - crossCache.at < 5000) return crossCache.text
+    const limit = Math.max(0, Math.min(20, Number(cfg.crossSessionFragments) || 6))
+    if (!limit) { crossCache = { at: now, text: '' }; return '' }
+    const d = new Date()
+    const p2 = (n) => String(n).padStart(2, '0')
+    const day = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`
+    const file = join(root, 'daily', `${day}.jsonl`)
+    if (!existsSync(file)) { crossCache = { at: now, text: '' }; return '' }
+    let lines = []
+    try { lines = readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean) } catch { lines = [] }
+    const frags = []
+    for (const line of lines) {
+      let f
+      try { f = JSON.parse(line) } catch { continue }
+      const them = (f.them || []).join('／').replace(/\s+/g, ' ').trim()
+      if (!them) continue
+      const me = (f.me || []).join('').replace(/\s+/g, ' ').trim()
+      const time = String(f.at || '').slice(11, 16)
+      frags.push(`· ${time} 他：${them.slice(0, 100)}${me ? `（我：${me.slice(0, 60)}）` : ''}`)
+    }
+    const text = frags.length
+      ? [
+        '## 今天跨会话聊过的（同一个使用者，别的窗口）',
+        '这些是同一个使用者在别的桌面会话里说的话、和另一个我的回应；可以当共同经历接上，',
+        '但**别假装是这一轮刚说的**，也别整段复述。你这一轮自己的对话仍以当前会话为准。',
+        ...frags.slice(-limit),
+      ].join('\n')
+      : ''
+    crossCache = { at: now, text }
+    return text
+  }
+
+  ctx.effect(() => ctx.systemPrompt.context({
+    name: 'memory:cross-session',
+    order: 810,
+    text: () => {
+      try { return renderCrossSession() } catch (e) { bootLog(`跨会话注入失败：${e?.message || e}`); return '' }
+    },
+  }))
+
   ctx.effect(() => ctx.systemPrompt.context({
     name: 'memory:core',
     order: 800,
@@ -258,6 +348,25 @@ export function apply(ctx, rawConfig) {
       try { return renderCore() } catch (e) { bootLog(`核心注入失败：${e?.message || e}`); return '' }
     },
   }))
+
+  /* ─────────────── 跨实例同步（2026-11-12） ───────────────
+   * 心跳 / 无头会话是另一个进程，写的是同一个 entries.jsonl。
+   * 桌面这边不重载就会一直看旧索引（实测差 28 条）。每 30 秒看一眼文件大小，
+   * 变了就重载；但**有回忆在进行时跳过**，免得把旧对象写回去。
+   */
+  const syncTimer = setInterval(() => {
+    try {
+      if (engine.hasPending()) return
+      if (store.reloadIfChanged()) {
+        coreCache = { at: 0, text: '' }
+        bootLog(`已同步外部写入：${store.size()} 条`)
+      }
+    } catch (e) {
+      bootLog(`跨实例同步失败：${e?.message || e}`)
+    }
+  }, 30_000)
+  if (syncTimer.unref) syncTimer.unref()
+  ctx.effect(() => () => clearInterval(syncTimer))
 
   /* ─────────────── 工具 ─────────────── */
 
@@ -285,6 +394,12 @@ export function apply(ctx, rawConfig) {
       note: deep && !deep.available() ? '没有 sessionQuery、也没有会话日志目录，L4 深挖降级（只靠条目库）' : undefined,
     },
     lastConsolidation: readLastReport(paths),
+    // 情绪 → 记忆深度（2026-10-30）：这里只读情绪，不改任何条目
+    emotion: {
+      file: cfg.emotionFile,
+      ...(currentEmotion() || {}),
+      note: '情绪越浓 → 新记忆越深（半衰期最长 ×2.5）；记不记仍由小鲤自己判断',
+    },
     config: {
       enabled: cfg.enabled,
       autoRecall: cfg.autoRecall,
@@ -304,6 +419,7 @@ export function apply(ctx, rawConfig) {
       maxFileMB: cfg.maxFileMB,
       catchUpOnStart: cfg.catchUpOnStart,
       coldBackupDir: cfg.coldBackupDir || '（未配置）',
+      emotionFile: cfg.emotionFile,
     },
     hostdeps: [...new Set(hostDeps.notes)],
   })
@@ -378,7 +494,7 @@ export function apply(ctx, rawConfig) {
 
   tool({
     name: 'memory_remember',
-    description: '明确记住一件事（比自动抽取更可靠）。适用于：使用者说"记住 X"、或你自己判断某件事以后一定用得上。同义/同事实会自动合并，不会记成两条。',
+    description: '明确记住一件事（比自动抽取更可靠）。适用于：使用者说"记住 X"、或你自己判断某件事以后一定用得上。同义/同事实会自动合并，不会记成两条。⭐ 情绪越浓，这条会记得越深（半衰期最长 ×2.5）；但要不要记、记什么，仍由你自己判断——插件不会因为情绪浓就自动写记忆。',
     parameters: {
       type: 'object',
       properties: {
@@ -396,6 +512,7 @@ export function apply(ctx, rawConfig) {
       if (SENSITIVE.test(text)) return { ok: false, error: '看起来像凭证/敏感信息，按章程不记' }
       if (text.length > 300) text = `${text.slice(0, 299)}…`
       const at = Date.now()
+      const emo = currentEmotion()
       const res = store.add({
         kind: args?.kind || 'fact',
         subject: 'user',
@@ -407,11 +524,13 @@ export function apply(ctx, rawConfig) {
         signalId: 'explicit',
         source: { sessionId: exec?.agent?.id || null, seq: null, quote: text },
         createdAt: at,
-      }, { at })
+      }, { at, emotion: emo })
       if (!res.entry) return { ok: false, error: '写入失败' }
       stats.inc('extracted')
       if (res.deduped) stats.inc('deduped')
       if (res.superseded) stats.inc('superseded')
+      const depth = Number(depthFactor(res.entry).toFixed(2))
+      const deep = depth > 1.2
       return {
         ok: true,
         id: res.entry.id,
@@ -420,7 +539,10 @@ export function apply(ctx, rawConfig) {
         text: res.entry.text,
         importance: res.entry.importance,
         layer: layerOf(res.entry, at),
-        hint: res.deduped ? '这条以前就记过，已合并（顺便复习了一次）' : '记下了',
+        emotion: res.entry.emotion || null,
+        depth,
+        hint: (res.deduped ? '这条以前就记过，已合并（顺便复习了一次）' : '记下了')
+          + (deep ? `　当时情绪偏浓（${res.entry.emotion?.label || ''}），这条会记得更深（半衰期 ×${depth}）` : ''),
       }
     },
   })
@@ -677,20 +799,24 @@ export function apply(ctx, rawConfig) {
     return sendJson(res, 404, { ok: false, error: `unknown route ${method} ${path}` })
   }
 
-  try {
-    ctx.effect(() => ctx.webServer.register({
-      kind: 'prefix',
-      path: '/api/memory',
-      handler: async (req, res) => {
-        try { await route(req, res) } catch (e) {
-          bootLog(`/api/memory 处理失败：${e?.stack || e?.message || e}`)
-          try { sendJson(res, 500, { ok: false, error: e?.message || String(e) }) } catch { /* 头已发 */ }
-        }
-      },
-    }))
-  } catch (e) {
-    bootLog(`设置页接口没挂上：${e?.message || e}`)
-  }
+  // 2026-11-07：webServer 不再是必需服务（headless 没有它），但桌面版有。
+  // 用 ctx.inject 开一个"等 webServer 就绪"的作用域：有就挂 /api/memory，没有就静静等着，插件本体照常。
+  ctx.inject(['webServer'], (ctx2) => {
+    try {
+      ctx2.effect(() => ctx2.webServer.register({
+        kind: 'prefix',
+        path: '/api/memory',
+        handler: async (req, res) => {
+          try { await route(req, res) } catch (e) {
+            bootLog(`/api/memory 处理失败：${e?.stack || e?.message || e}`)
+            try { sendJson(res, 500, { ok: false, error: e?.message || String(e) }) } catch { /* 头已发 */ }
+          }
+        },
+      }))
+    } catch (e) {
+      bootLog(`设置页接口没挂上：${e?.message || e}`)
+    }
+  })
 
   /* ─────────────── 写入：用户消息 → 启发式抽取 ─────────────── */
 
@@ -709,10 +835,11 @@ export function apply(ctx, rawConfig) {
     if (cfg.extractMode === 'off') return
     const now = at || Date.now()
     const candidates = extract(text, { sessionId, seq, at: now })
+    const emo = currentEmotion()          // 这一批话写进记忆时的情绪（同一时刻）
     for (const cand of candidates) {
       if ((cand.importance || 3) < num(cfg.minImportance, 2)) continue
       try {
-        const r = store.add(cand, { at: now })
+        const r = store.add(cand, { at: now, emotion: emo })
         stats.inc('extracted')
         if (r.deduped) stats.inc('deduped')
         if (r.superseded) stats.inc('superseded')
@@ -726,6 +853,7 @@ export function apply(ctx, rawConfig) {
   ctx.on('session/event', (session, event) => {
     try {
       if (!event || event.type !== 'user/message') return
+      drainOwnerInbox()                                   // 使用者刚在抖音说话的话，顺手收进来
       const sid = session?.id ?? session?.header?.id ?? null
       const origin = session?.origin ?? session?.header?.origin
       if (origin === 'subagent') return                   // 子 agent 的任务书不当记忆

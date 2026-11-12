@@ -173,6 +173,7 @@ window.__ModuleLoader__.load({
           modelCalls: t.modelCalls ?? 0,
           bytes: stats.storageBytes ?? 0,
           maxEntries: stats.counts?.maxEntries ?? 20000,
+          emotion: stats.emotion || null,
           total,
         }
       }, [stats, total])
@@ -212,6 +213,12 @@ window.__ModuleLoader__.load({
           h('span', null, `上限 ${summary.maxEntries} 条`),
           h('span', null, `当前 ${summary.total} 条命中`),
         ),
+
+        summary?.emotion
+          ? h('div', { style: { ...S.note, opacity: 0.85 } },
+            `情绪 → 记忆深度：此刻 ${summary.emotion.label || '平静'} ${pct(summary.emotion.v || 0)}`
+            + ` → 新记忆深度 ×${summary.emotion.depth || 1}（记不记由小鲤自己判断）`)
+          : null,
 
         h('div', { style: S.row },
           h('button', {
@@ -264,6 +271,8 @@ window.__ModuleLoader__.load({
                   h('span', { style: S.badge }, LAYER_LABEL[e.layer] || e.layer),
                   e.pinned ? h('span', { style: S.badge }, '置顶') : null,
                   e.status !== 'active' ? h('span', { style: S.badge }, STATUS_LABEL[e.status] || e.status) : null,
+                  e.emotion ? h('span', { style: S.badge }, `情绪 · ${e.emotion.label} ${pct(e.emotion.v)}`) : null,
+                  e.depth > 1.05 ? h('span', { style: S.badge }, `深度 ×${e.depth}`) : null,
                   h('span', { style: { ...S.badge, opacity: 0.6 } }, `重要度 ${e.importance}`),
                   h('div', { style: S.bar }, h('div', { style: S.barFill(e.strength) })),
                   h('span', { style: { ...S.meta, marginLeft: 'auto' } }, `强度 ${pct(e.strength)} · 熟练 ${pct(e.fluency)}`),

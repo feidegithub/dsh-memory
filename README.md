@@ -4,6 +4,7 @@
 
 - 常提的事越提越牢，久不提的小事慢慢变淡；
 - 回忆从快到慢逐层下沉；**60 秒内想不起来就当作忘了**；
+- 情绪也会留下印子：写下时的情绪越浓，记得越深（半衰期最长 ×2.5）；要不要记仍由小鲤自己判断；
 - 联想只用本地规则（同义词表 + 别名），**不调模型**（零 token）。
 
 完整设计见 [`docs/design.md`](docs/design.md)，变更历史见 [`CHANGELOG.md`](CHANGELOG.md)。
@@ -40,8 +41,13 @@ $DSH_HOME/memory\        ← 主存（默认位置，可用 storageDir 改）
   synonyms.json        # 同义词/别名表，可手工加
   index.json           # 预留（当前启动时从 entries.jsonl 重建倒排）
   memory.log           # 启动/异常日志
+  inbox\douyin-owner.jsonl        # 抖音私信收件箱（dm-watch 追加，这里单进程收）
+  inbox\douyin-owner.offset.json  # 收到哪了（字节偏移，避免重收）
   episodes\ archive\ backups\
 ```
+
+情绪状态不在这里：默认读 `$DOUYIN_HOME/emotion.json`（和 dsh-persona / dm-watch 共用，**只读**）；
+文件不在就当平静，记忆照常按原规则走。
 
 **遗忘不是删除**：条目永远留在 `entries.jsonl`，只是 `strength` 变低、默认搜不到；
 `include_faded` / `include_archived` 或换条线索仍能捞回来。真删只有 `purge`（记忆归我自己维护，
@@ -79,6 +85,48 @@ $DSH_HOME/memory\        ← 主存（默认位置，可用 storageDir 改）
 数据走宿主 `/api/memory/*`：`GET /stats /entries /entry`，
 `POST /pin /forget /restore /update /purge /import /consolidate /backup /export`。
 
+## 情绪 → 记忆的深度（2026-10-30 绑定）
+
+使用者要求把**情绪插件**和**记忆插件**绑起来：情绪影响记忆的深度，但**要不要记下某条记忆仍由小鲤自己判断**。
+实现故意做得很松，不 import 情绪插件的代码，只读它维护的同一个 `emotion.json`：
+
+```
+weight = 0.8 × 最浓的那种情绪 + 0.2 × |心情|      （0..1）
+depth  = 1 + 1.5 × weight                        （半衰期最多拉长到 2.5 倍）
+```
+
+- **写入时**：`memory_remember` 和自动抽取都会把当时的情绪印记写进条目
+  （`emotion` / `emotionalWeight` / `emotionAt`）；之后这条记忆的半衰期按 `depth` 拉长。
+- **排序时**：`scoreEntry` 给情绪深度 +0.04 的权重（同等文字匹配下，当时情绪更浓的事更容易先被想起）。
+- **合并/导入时**：情绪印记只升不降；合并两条重复记忆时取更深的那个，不会把情绪浓的那条丢掉。
+- **只读**：文件不在 / 坏了 → 当作平静（weight 0），记忆完全按原来的规则走，不报错、不阻塞。
+- **不自动写**：情绪再浓，插件也不会因为"这一刻很强烈"就自己写记忆；写不写、写什么，仍由小鲤决定
+  （`memory_remember` / `memory_forget` 都在她手里）。
+
+默认读 `$DOUYIN_HOME/emotion.json`（和 `dsh-persona`、`dm-watch` 同一个文件），可用 `emotionFile` 改。
+设置 → 记忆 顶部会显示"此刻情绪 → 新记忆深度 ×N"，每条记忆也会带「情绪 · 开心 70% / 深度 ×1.9」的小标签。
+
+## 抖音使用者私信也走这条路（2026-10-30）
+
+使用者说「抖音那边我说话也走桌面记忆这条路」——现在主号在抖音私信里说的话，也会进这份记忆：
+
+- `dm-watch` 把使用者原话 **+ 当时的情绪快照** 追加到 `inbox\douyin-owner.jsonl`，
+  **不直接写** `entries.jsonl`（两个进程同时写 append-only 库会互相踩）。
+- 桌面这边的 `dsh-memory` 单进程收取：启动时、每分钟、以及桌面每次收到消息时各收一次；
+  走**同一套抽取规则**（`extract`）和同一套情绪深度。桌面没开也没关系，等它起来再收。
+- 收取按字节偏移（`douyin-owner.offset.json`），只读新增的完整行；重复/半行都不会丢或重记。
+- **只收使用者**；其他人的私信不进这条路（仍是 `douyin_remember` 的按人记忆）。
+- 自检：`node _shims/owner-memory-queue-test.mjs`（投递 + 收取 + 情绪深度，6 项）。
+
+## 私密词表（2026-11-02）
+
+有些话只该留在桌面记忆里，不该进私信 / 评论的提示词。做法：
+
+- `<memory root>\private-terms.txt`：一行一个词，`#` 开头是注释（这个词表本身也只在本机）。
+- 写入记忆时，文本命中词表 → 自动打上「私密」标签；`mem-recall.mjs`（无头检索）默认跳过
+  「私密」标签，**也直接按词表匹配文本兜底**（旧条目、漏打标签的条目都挡得住）。
+- 桌面记忆仍能记、能回忆；只是对外通道不会把它塞进提示词。
+
 ## 配置（设置页可改）
 
 | 字段 | 默认 | 说明 |
@@ -99,6 +147,7 @@ $DSH_HOME/memory\        ← 主存（默认位置，可用 storageDir 改）
 | `archiveAfterDays` | 180 | 多少天没复习才考虑归档 |
 | `archiveBelowStrength` | 0.12 | 强度低于这个才归档（**不删**） |
 | `consolidateAt` | `03:30` | 每天巩固时间 |
+| `emotionFile` | 空 → `$DOUYIN_HOME/emotion.json` | 情绪状态文件（和 dsh-persona / dm-watch 共用）；留空用默认 |
 | `debug` | false | 往 `memory.log` 写更多 |
 
 ## L4 怎么"翻硬盘"
@@ -116,7 +165,7 @@ $DSH_HOME/memory\        ← 主存（默认位置，可用 storageDir 改）
 
 ```powershell
 cd <插件目录>
-node tools/smoke.mjs     # 自检 80 项
+node tools/smoke.mjs     # 自检 87 项
 node tools/review.mjs    # 体检：最近记了什么、有没有重复、哪些问法没想起来
 ```
 

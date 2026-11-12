@@ -16,7 +16,8 @@ import { MemoryStore } from '../lib/store.mjs'
 import { RecallEngine } from '../lib/recall.mjs'
 import { Stats } from '../lib/stats.mjs'
 import { extract, looksLikeDocument } from '../lib/extract.mjs'
-import { DAY, halfLifeDays, isFaded, strengthAt } from '../lib/model.mjs'
+import { DAY, halfLifeDays, isFaded, strengthAt, describeEntry } from '../lib/model.mjs'
+import { normalizeEmotionState, depthFactor } from '../lib/emotion-bridge.mjs'
 import { resolveConfig } from '../lib/config.mjs'
 import { DEFAULT_STORAGE_DIR, resolveStorageDir } from '../lib/paths.mjs'
 
@@ -301,6 +302,48 @@ check('真删返回成功', store.purge(doomed.id) === true)
 check('真删后内存里没有了', !store.get(doomed.id))
 check('真删写了墓碑', statSync(paths.purged).size > 0)
 check('真删后文件里也不留原文', !readFileSync(paths.entries, 'utf8').includes('这条待会儿要真删的独特句子'))
+
+console.log(`\n[14] 情绪 → 记忆深度（2026-10-30 绑定）`)
+const emoHigh = normalizeEmotionState({ mood: 0.5, emotions: { joy: 0.9 } })
+check('情绪快照：开心 0.9 / 深度 ×2.23', Math.abs(emoHigh.weight - 0.82) < 0.01 && Math.abs(emoHigh.depth - 2.23) < 0.02, `weight=${emoHigh.weight} depth=${emoHigh.depth}`)
+const plain = store.add({ kind: 'fact', text: '平静时记下的一条：窗台上有一盆薄荷', importance: 3, signalId: 'explicit', createdAt: Date.now(), source: null }).entry
+const deep = store.add({ kind: 'episode', text: '情绪很浓时记下的一条：他今天说想我了', importance: 3, signalId: 'explicit', createdAt: Date.now(), source: null }, { emotion: emoHigh }).entry
+check('情绪浓的条目带情绪印记', deep.emotionalWeight > 0.5 && deep.emotion?.label === '开心', JSON.stringify(deep.emotion))
+check('情绪越浓半衰期越长', halfLifeDays(deep) > halfLifeDays(plain) * 1.5, `plain=${halfLifeDays(plain).toFixed(1)}d deep=${halfLifeDays(deep).toFixed(1)}d`)
+check('describeEntry 带深度倍数', describeEntry(deep).depth > 2 && describeEntry(plain).depth === 1, `deep=${describeEntry(deep).depth} plain=${describeEntry(plain).depth}`)
+const dry = store.add({ kind: 'fact', text: '没有情绪印记的一条：钥匙在抽屉', importance: 3, signalId: 'explicit', createdAt: Date.now(), source: null }).entry
+check('没有情绪就不硬加深度', (dry.emotionalWeight || 0) === 0 && (dry.emotion || null) === null && depthFactor(dry) === 1)
+
+console.log(`\n[15] 私密词表（2026-11-02：真名只留在桌面）`)
+writeFileSync(join(root, 'private-terms.txt'), '# test\n秘密代号\n', 'utf8')
+const priv = store.add({ kind: 'fact', text: '秘密代号是蓝鲸', importance: 3, signalId: 'explicit', createdAt: Date.now(), source: null }).entry
+check('命中词表自动打「私密」标签', (priv.tags || []).includes('私密'), JSON.stringify(priv.tags))
+const open = store.add({ kind: 'fact', text: '公开的一条：周末去爬山', importance: 3, signalId: 'explicit', createdAt: Date.now(), source: null }).entry
+check('没命中词表就不加「私密」', !(open.tags || []).includes('私密'), JSON.stringify(open.tags))
+
+console.log(`\n[16] 心跳日记降级 + 跨实例重载（2026-11-12）`)
+const hb = store.add({ kind: 'episode', text: '2026-11-12 20:32 第99回醒：他在电脑前改人格，我没递话。', importance: 3, signalId: 'explicit', createdAt: Date.now(), source: null }).entry
+check('心跳 episode 写入即压到 importance 1', hb.importance === 1, `importance=${hb.importance}`)
+check('打了「心跳」标签', (hb.tags || []).includes('心跳'), JSON.stringify(hb.tags))
+
+// 旧条目是历史数据：直接 save（绕过写入时的降级），模拟升级前的库
+const legacy = store.save({
+  id: 'mem_smoke_hb_legacy', kind: 'episode', subject: 'user',
+  text: '第98回醒：旧的一条，当年记成了 importance 4',
+  tags: [], importance: 4, confidence: 0.8, status: 'active',
+  strengthBase: 1, strengthAt: Date.now(), fluency: 0.5, mentionCount: 1, recallCount: 0,
+  createdAt: Date.now() - 86400000, updatedAt: Date.now() - 86400000, source: null, cues: [],
+})
+check('（构造）旧心跳条目 importance=4', store.get(legacy.id).importance === 4)
+const nDown = store.downgradeHeartbeatEpisodes(Date.now())
+check('巩固时能把历史心跳降级', nDown >= 1 && store.get(legacy.id).importance === 1, `downgraded=${nDown}`)
+
+// 跨实例：另一个实例往同一个库写，本实例 reloadIfChanged 要能看见
+const store3 = new MemoryStore({ cfg, paths, log: quiet }).load()
+store3.add({ kind: 'fact', text: '另一实例写进来的一条：阳台的薄荷该浇水了', importance: 3, signalId: 'explicit', createdAt: Date.now(), source: null })
+check('外部写入后 reloadIfChanged 返回 true', store.reloadIfChanged() === true)
+check('重载后能看到那条', [...store.live()].some((e) => e.text.includes('阳台的薄荷')))
+check('没有变化时不重载', store.reloadIfChanged() === false)
 
 engine2.dispose()
 engine.dispose()

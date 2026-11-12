@@ -1,4 +1,4 @@
-# 依赖与构建产物
+﻿# 依赖与构建产物
 node_modules/
 .pnpm-store/
 
@@ -21,3 +21,8 @@ memory.log
 .DS_Store
 Thumbs.db
 *.tmp
+
+# 本地备份（改代码前的快照，不进仓库）
+*.bak
+*.bak-*
+*.orig
