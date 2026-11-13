@@ -150,7 +150,9 @@ window.__ModuleLoader__.load({
         setBusy(label)
         try {
           const res = await fn()
-          setNote(res && res.ok === false ? `失败：${res.error || '未知错误'}` : '')
+          // ⚠️ 成功时**不要**清空 note：fn 里刚写的"已冷备到…/已导出…"会被这一行擦掉，
+          //    看起来就像点了没反应（2026-11-13 用户报的两个按钮之一就是这个）。
+          if (res && res.ok === false) setNote(`失败：${res.error || '未知错误'}`)
           await load(q, status, true)
         } catch (e) {
           setNote(`失败：${e.message}`)
@@ -231,10 +233,14 @@ window.__ModuleLoader__.load({
             disabled: !!busy,
             onClick: () => act('backup', async () => {
               const r = await api('/backup', { method: 'POST', body: '{}' })
-              setNote(r.skipped ? 'E 盘不在，跳过冷备（不影响主存）' : `已冷备到 ${r.dest || ''}`)
+              setNote(r.ok === false
+                ? `备份失败：${r.error || '未知错误'}`
+                : r.cold
+                  ? `已冷备到 ${r.dest || ''}`
+                  : `已备份到本地 ${r.dest || ''}（设置里填 coldBackupDir 可备到外挂盘）`)
               return r
             }),
-          }, '冷备到 E 盘'),
+          }, busy === 'backup' ? '备份中…' : '备份'),
           h('button', {
             style: S.btn,
             disabled: !!busy,
@@ -244,18 +250,21 @@ window.__ModuleLoader__.load({
               return r
             }),
           }, '导出 JSON'),
-          h('button', {
-            style: S.btn,
-            disabled: !!busy,
-            onClick: () => { if (fileRef.current) fileRef.current.click() },
-          }, busy === 'import' ? '导入中…' : '导入 JSON'),
-          h('input', {
-            ref: fileRef,
-            type: 'file',
-            accept: '.json,application/json',
-            style: { display: 'none' },
-            onChange: onImport,
-          }),
+          // 导入：用 <label> 包住隐藏的 file input，靠原生 label 激活打开选择框。
+          // 之前是按钮 + input.display='none' 再用 ref.click()，在 WebView 里点不开（2026-11-13）。
+          h('label', {
+            style: { ...S.btn, opacity: busy ? 0.6 : 1, cursor: busy ? 'default' : 'pointer' },
+            title: '选一个导出的 JSON 合并进来',
+          },
+            busy === 'import' ? '导入中…' : '导入 JSON',
+            h('input', {
+              ref: fileRef,
+              type: 'file',
+              accept: '.json,application/json',
+              style: { position: 'absolute', width: 1, height: 1, opacity: 0, overflow: 'hidden' },
+              onChange: onImport,
+            }),
+          ),
         ),
 
         note ? h('div', { style: S.note }, note) : null,

@@ -760,7 +760,8 @@ export function apply(ctx, rawConfig) {
     }
     if (method === 'POST' && path === '/backup') {
       // 冷备到 coldBackupDir；没配就退到本地 backups/（至少有一份），盘不在就跳过，绝不阻塞
-      const cold = toStr(cfg.coldBackupDir, '') || join(root, 'backups')
+      const configured = toStr(cfg.coldBackupDir, '')
+      const cold = configured || join(root, 'backups')
       const day = new Date()
       const stamp = `${day.getFullYear()}${String(day.getMonth() + 1).padStart(2, '0')}${String(day.getDate()).padStart(2, '0')}`
       const dest = join(cold, stamp)
@@ -774,7 +775,7 @@ export function apply(ctx, rawConfig) {
           copied.push(name)
         }
         writeJsonAtomic(join(dest, 'backup.json'), { at: Date.now(), files: copied })
-        return sendJson(res, 200, { ok: true, dest, files: copied })
+        return sendJson(res, 200, { ok: true, dest, files: copied, cold: !!configured })
       } catch (e) {
         return sendJson(res, 200, { ok: false, error: e?.message || String(e) })
       }
