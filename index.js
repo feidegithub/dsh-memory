@@ -305,34 +305,45 @@ export function apply(ctx, rawConfig) {
     const limit = Math.max(0, Math.min(20, Number(cfg.crossSessionFragments) || 6))
     if (!limit) { crossCache = { at: now, text: '' }; return '' }
     const d = new Date()
-    const p2 = (n) => String(n).padStart(2, '0')
-    const dayOf = (dt) => `${dt.getFullYear()}-${p2(dt.getMonth() + 1)}-${p2(dt.getDate())}`
+    const dayOf = (dt) => `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`
     /**
-     * 🔴 2026-11-15（主人：过零点就忘了 24 点前的事）：
-     *   当天库按日期分文件，0 点后只读今天那份，23:5x 的对话整个消失——
-     *   明明只隔十分钟，接话却像第一次见。
-     *   凌晨（< 8 点）把昨天那份也拼进来，按 ts 排序取最近几条。
+     * 🔴 2026-11-15（主人：0 点换文件就记忆割裂）：
+     *   以前只读 daily/<日期>.jsonl —— 0 点一换文件，前一晚最近的对话就不在了。
+     *   现在优先读**滚动库** recent.jsonl（跨天不重置，写入端每条同时写两份）；
+     *   滚动库还没有（老数据）才退回按天读今天+昨天。
      */
-    const files = []
-    if (d.getHours() < 8) files.push(join(root, 'daily', `${dayOf(new Date(now - 86_400_000))}.jsonl`))
-    files.push(join(root, 'daily', `${dayOf(d)}.jsonl`))
     const rows = []
-    for (const file of files) {
-      if (!existsSync(file)) continue
+    const take = (f) => {
+      const ts = Number(f.ts) || Date.parse(String(f.at || '').replace(' ', 'T')) || 0
+      rows.push({ f, ts })
+    }
+    const recentFile = join(root, 'recent.jsonl')
+    if (existsSync(recentFile)) {
       let lines = []
-      try { lines = readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean) } catch { lines = [] }
-      for (const line of lines) {
-        let f
-        try { f = JSON.parse(line) } catch { continue }
-        const ts = Number(f.ts) || Date.parse(String(f.at || '').replace(' ', 'T')) || 0
-        rows.push({ f, ts })
+      try { lines = readFileSync(recentFile, 'utf8').split(/\r?\n/).filter(Boolean) } catch { lines = [] }
+      for (const line of lines.slice(-400)) {
+        try { take(JSON.parse(line)) } catch { /* 坏行跳过 */ }
+      }
+    }
+    if (!rows.length) {
+      const files = []
+      if (d.getHours() < 8) files.push(join(root, 'daily', `${dayOf(new Date(now - 86_400_000))}.jsonl`))
+      files.push(join(root, 'daily', `${dayOf(d)}.jsonl`))
+      for (const file of files) {
+        if (!existsSync(file)) continue
+        let lines = []
+        try { lines = readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean) } catch { lines = [] }
+        for (const line of lines) { try { take(JSON.parse(line)) } catch { /* 坏行跳过 */ } }
       }
     }
     rows.sort((a, b) => a.ts - b.ts)
+    const seen = new Set()
     const frags = []
     for (const { f, ts } of rows) {
       const them = (f.them || []).join('／').replace(/\s+/g, ' ').trim()
       if (!them) continue
+      if (f.id && seen.has(f.id)) continue
+      if (f.id) seen.add(f.id)
       const me = (f.me || []).join('').replace(/\s+/g, ' ').trim()
       const time = String(f.at || '').slice(11, 16)
       const tag = new Date(ts).getDate() !== d.getDate() ? '（昨晚）' : ''
