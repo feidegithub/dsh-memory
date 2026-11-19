@@ -240,7 +240,7 @@ export function apply(ctx, rawConfig) {
   /* ─────────────── L1：常驻核心注入 ─────────────── */
 
   const coreBudget = () => Math.max(120, cfg.coreBudgetTokens)
-  let coreCache = { at: 0, text: '' }
+  let coreCache = { at: 0, text: '', used: 0 }
 
   function coreEntries(now) {
     const out = []
@@ -257,11 +257,11 @@ export function apply(ctx, rawConfig) {
 
   function renderCore() {
     const now = Date.now()
-    if (now - coreCache.at < 1500) return coreCache.text
+    if (now - coreCache.at < 1500) { if (coreCache.used) stats.noteInject(coreCache.used); return coreCache.text }
     const budget = coreBudget()
     const all = coreEntries(now)
     if (!all.length) {
-      coreCache = { at: now, text: '' }
+      coreCache = { at: now, text: '', used: 0 }
       return ''
     }
     const lines = []
@@ -287,7 +287,7 @@ export function apply(ctx, rawConfig) {
       hidden > 0 ? `- （另有 ${hidden} 条较淡的事，需要时用 memory_recall 查）` : '',
     ].filter(Boolean).join('\n')
     if (used > 0) stats.noteInject(used)
-    coreCache = { at: now, text }
+    coreCache = { at: now, text, used }
     return text
   }
 
@@ -386,7 +386,7 @@ export function apply(ctx, rawConfig) {
     try {
       if (engine.hasPending()) return
       if (store.reloadIfChanged()) {
-        coreCache = { at: 0, text: '' }
+        coreCache = { at: 0, text: '', used: 0 }
         bootLog(`已同步外部写入：${store.size()} 条`)
       }
     } catch (e) {
